@@ -47,16 +47,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	inMemoryCache := new(sync.Map)
+	inMemoryCache := sync.Map{}
 
-	if err := storage.LoadCacheFromDB(inMemoryCache, log); err != nil {
+	if err := storage.LoadCacheFromDB(&inMemoryCache, log); err != nil {
 		log.Error("Failed to load cache from database", "error", err)
 		os.Exit(1)
 	}
 
 	jwtSecret := []byte("secret42212")
 
-	apiServer := api.New(cfg, log, inMemoryCache, storage, jwtSecret)
+	apiServer := api.New(cfg, log, &inMemoryCache, storage, jwtSecret)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)

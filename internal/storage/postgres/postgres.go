@@ -49,6 +49,30 @@ func (s *Storage) SaveUser(ctx context.Context, username string, passHash []byte
 	return nil
 }
 
+func (s *Storage) GetUser(ctx context.Context, username string) (*models.User, error) {
+	const op = "storage.postgres.GetUser"
+
+	var user models.User
+
+	stmt, err := s.db.Prepare("SELECT * FROM users WHERE username = $1")
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+
+	rows, err := stmt.QueryContext(ctx, username)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+
+	for rows.Next() {
+		if err := rows.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Balance, &user.CreatedAt); err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
+		}
+	}
+
+	return &user, nil
+}
+
 func (s *Storage) SaveTransaction(ctx context.Context, senderUserID, receiverUserID, amount int) error {
 	const op = "storage.postgres.SaveTransaction"
 
@@ -92,7 +116,7 @@ func (s *Storage) GetMerch(ctx context.Context, item string) (*models.Merch, err
 	return &merch, nil
 }
 
-func (s *Storage) FirstBuyItem(ctx context.Context, userID int, itemID int) error {
+func (s *Storage) FirstBuyItem(ctx context.Context, userID int, itemID int, amount int) error {
 	const op = "storage.postgres.BuyItem"
 
 	stmt, err := s.db.Prepare("INSERT INTO inventory(user_id, merch_id, quantity) VALUES($1, $2, $3)")
@@ -105,10 +129,15 @@ func (s *Storage) FirstBuyItem(ctx context.Context, userID int, itemID int) erro
 		return fmt.Errorf("%s: %w", op, err)
 	}
 
+	err = s.UpdateBalance(ctx, userID, -amount)
+	if err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+
 	return nil
 }
 
-func (s *Storage) BuyItem(ctx context.Context, userID int, itemID int) error {
+func (s *Storage) BuyItem(ctx context.Context, userID int, itemID int, amount int) error {
 	const op = "storage.postgres.BuyItem"
 
 	stmt, err := s.db.Prepare("UPDATE inventory SET quantity = quantity + 1 WHERE user_id = $1 AND merch_id = $2")
@@ -117,6 +146,11 @@ func (s *Storage) BuyItem(ctx context.Context, userID int, itemID int) error {
 	}
 
 	_, err = stmt.ExecContext(ctx, userID, itemID)
+	if err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+
+	err = s.UpdateBalance(ctx, userID, -amount)
 	if err != nil {
 		return fmt.Errorf("%s: %w", op, err)
 	}
@@ -159,7 +193,7 @@ func (s *Storage) LoadCacheFromDB(cache *sync.Map, log *slog.Logger) error {
 			return err
 		}
 
-		var merch map[int]models.Merch
+		merch := make(map[int]models.Merch)
 		merchRows, err := s.db.Query("SELECT * FROM merch")
 		if err != nil {
 			return err
@@ -178,7 +212,7 @@ func (s *Storage) LoadCacheFromDB(cache *sync.Map, log *slog.Logger) error {
 			merch[m.ID] = m
 		}
 
-		var inventories map[string]int
+		inventories := make(map[string]int)
 		inventoriesRows, err := s.db.Query("SELECT * FROM inventory WHERE user_id = $1", user.ID)
 		if err != nil {
 			return err
@@ -198,7 +232,6 @@ func (s *Storage) LoadCacheFromDB(cache *sync.Map, log *slog.Logger) error {
 		}
 		user.Inventory = inventories
 
-		var transactions []models.Transaction
 		transactionsRows, err := s.db.Query("SELECT * FROM transactions WHERE sender_id = $1 OR receiver_id = $1", user.ID)
 		if err != nil {
 			return err
@@ -214,16 +247,14 @@ func (s *Storage) LoadCacheFromDB(cache *sync.Map, log *slog.Logger) error {
 			if err := transactionsRows.Scan(&transaction.ID, &transaction.SenderID, &transaction.ReceiverID, &transaction.Amount, &transaction.CreatedAt); err != nil {
 				return err
 			}
-			transactions = append(transactions, transaction)
-			if transaction.SenderID == user.ID {
-				user.CoinSent += transaction.Amount
+			if transaction.SenderID == user.ID && transaction.Amount != 0 {
+				user.SentTransactions = append(user.SentTransactions, transaction)
 			}
-			if transaction.ReceiverID == user.ID {
-				user.CoinReceived += transaction.Amount
+			if transaction.ReceiverID == user.ID && transaction.Amount != 0 {
+				user.ReceivedTransactions = append(user.ReceivedTransactions, transaction)
 			}
 		}
-		user.Transactions = transactions
-		cache.Store(user.Username, user)
+		cache.Store(user.ID, user)
 	}
 	return nil
 }

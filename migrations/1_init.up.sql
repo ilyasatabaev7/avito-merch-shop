@@ -43,6 +43,7 @@ CREATE TABLE transactions
     id          SERIAL PRIMARY KEY,
     sender_id   INT REFERENCES users (id) ON DELETE CASCADE,
     receiver_id INT REFERENCES users (id) ON DELETE CASCADE,
+    sender
     amount      INT NOT NULL CHECK (amount > 0),
     created_at  TIMESTAMP DEFAULT NOW()
 );

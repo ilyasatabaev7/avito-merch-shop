@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/IlyasAtabaev731/avito-merch-shop/internal/config"
 	"github.com/IlyasAtabaev731/avito-merch-shop/internal/domain/models"
 	"github.com/IlyasAtabaev731/avito-merch-shop/internal/lib/jwt"
@@ -80,22 +81,22 @@ type AuthResponse struct {
 
 func (s *APIServer) authHandler() func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		var req AuthRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Неверный формат запроса", http.StatusBadRequest)
 			return
 		}
 
-		cachedUser, ok := s.cache.Load(req.Username)
+		user, err := s.storage.GetUser(context.Background(), req.Username)
+		expirationTime := 24 * time.Hour
 
-		if !ok {
+		if user == nil || user.Username == "" {
 			user, err := s.registerNewUser(req.Username, []byte(req.Password))
 			if err != nil {
 				http.Error(w, "Ошибка регистрации", http.StatusInternalServerError)
 				return
 			}
-
-			expirationTime := 24 * time.Hour
 
 			token, err := jwt.NewToken(user, string(s.jwtSecret), expirationTime)
 
@@ -106,35 +107,36 @@ func (s *APIServer) authHandler() func(http.ResponseWriter, *http.Request) {
 			return
 		}
 
-		user, ok := cachedUser.(models.User)
-		if !ok {
-			http.Error(w, "Неверный формат пользователя", http.StatusInternalServerError)
-			return
-		}
-		err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password))
+		err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password))
 
 		if err != nil {
 			http.Error(w, "Неверные учетные данные", http.StatusUnauthorized)
 			return
 		}
+
+		token, err := jwt.NewToken(user, string(s.jwtSecret), expirationTime)
+
+		err = json.NewEncoder(w).Encode(AuthResponse{Token: token})
+		if err != nil {
+			return
+		}
+
 	}
 }
 
 func (s *APIServer) authenticate(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		tokenHeader := r.Header.Get("Authorization")
 		if tokenHeader == "" {
 			http.Error(w, "Токен отсутствует", http.StatusUnauthorized)
 			return
 		}
-
+		tokenStr := tokenHeader
 		parts := strings.Split(tokenHeader, " ")
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			http.Error(w, "Неверный формат токена", http.StatusUnauthorized)
-			return
+		if len(parts) == 2 || parts[0] == "Bearer" {
+			tokenStr = parts[1]
 		}
-
-		tokenStr := parts[1]
 
 		claims, err := jwt.ParseToken(tokenStr, string(s.jwtSecret))
 		if err != nil {
@@ -142,7 +144,7 @@ func (s *APIServer) authenticate(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		r = r.WithContext(context.WithValue(r.Context(), "username", claims["username"].(string)))
+		r = r.WithContext(context.WithValue(r.Context(), "id", int(claims["uid"].(float64))))
 		next(w, r)
 	}
 }
@@ -150,19 +152,19 @@ func (s *APIServer) authenticate(next http.HandlerFunc) http.HandlerFunc {
 func (s *APIServer) registerNewUser(username string, password []byte) (*models.User, error) {
 	s.logger.Info("Register new user", slog.String("username", username))
 
-	passРash, err := bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
+	passHash, err := bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
 	if err != nil {
 		s.logger.Error("Failed to hash password", "error", err)
 		return nil, err
 	}
 
-	err = s.storage.SaveUser(context.Background(), username, passРash)
+	err = s.storage.SaveUser(context.Background(), username, passHash)
 	if err != nil {
 		s.logger.Error("Failed to save user", "error", err)
 		return nil, err
 	}
 
-	user := models.User{Username: username, PasswordHash: string(passРash), Balance: 1000}
+	user := models.User{Username: username, PasswordHash: string(passHash), Balance: 1000}
 	s.cache.Store(username, user)
 
 	return &user, nil
@@ -170,6 +172,7 @@ func (s *APIServer) registerNewUser(username string, password []byte) (*models.U
 
 func (s *APIServer) buyItemHandler() func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		vars := mux.Vars(r)
 		item := vars["item"]
 
@@ -181,8 +184,8 @@ func (s *APIServer) buyItemHandler() func(http.ResponseWriter, *http.Request) {
 			return
 		}
 
-		username := r.Context().Value("username")
-		cachedUser, ok := s.cache.Load(username)
+		id := r.Context().Value("id")
+		cachedUser, ok := s.cache.Load(id)
 
 		if !ok {
 			http.Error(w, "Неверный формат пользователя", http.StatusInternalServerError)
@@ -202,12 +205,16 @@ func (s *APIServer) buyItemHandler() func(http.ResponseWriter, *http.Request) {
 			return
 		}
 
+		if len(user.Inventory) == 0 {
+			user.Inventory = make(map[string]int)
+		}
+
 		if _, ok := user.Inventory[item]; !ok {
 			user.Inventory[item] = 0
-			err = s.storage.FirstBuyItem(context.Background(), user.ID, merch.ID)
+			err = s.storage.FirstBuyItem(context.Background(), user.ID, merch.ID, merch.Price)
 
 		} else {
-			err = s.storage.BuyItem(context.Background(), user.ID, merch.ID)
+			err = s.storage.BuyItem(context.Background(), user.ID, merch.ID, merch.Price)
 		}
 
 		if err != nil {
@@ -219,7 +226,7 @@ func (s *APIServer) buyItemHandler() func(http.ResponseWriter, *http.Request) {
 		user.Inventory[item] += 1
 		user.Balance -= merch.Price
 
-		s.cache.Store(username, user)
+		s.cache.Store(id, user)
 
 		s.logger.Info("Buy item", slog.String("item", item))
 
@@ -228,25 +235,19 @@ func (s *APIServer) buyItemHandler() func(http.ResponseWriter, *http.Request) {
 }
 
 type SendCoinRequest struct {
-	toUser string
-	amount int
+	ToUser string `json:"toUser"`
+	Amount int    `json:"amount"`
 }
 
 func (s *APIServer) sendCoinHandler() func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		var req SendCoinRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Неверный формат запроса", http.StatusBadRequest)
 			return
 		}
-		receiver, ok := s.cache.Load(req.toUser)
-
-		if !ok {
-			http.Error(w, "Получатель не найден", http.StatusNotFound)
-			return
-		}
-
-		sender, ok := s.cache.Load(r.Context().Value("username"))
+		sender, ok := s.cache.Load(r.Context().Value("id"))
 
 		if !ok {
 			http.Error(w, "Отправитель не найден", http.StatusNotFound)
@@ -258,60 +259,83 @@ func (s *APIServer) sendCoinHandler() func(http.ResponseWriter, *http.Request) {
 			http.Error(w, "Неверный формат отправителя", http.StatusInternalServerError)
 			return
 		}
-		receiverUser, ok := receiver.(models.User)
-		if !ok {
-			http.Error(w, "Неверный формат получателя", http.StatusInternalServerError)
+
+		if senderUser.Username == req.ToUser {
+			http.Error(w, "Нельзя отправить деньги самому себе", http.StatusBadRequest)
 			return
 		}
-		if senderUser.Balance < req.amount {
+
+		receiver, err := s.storage.GetUser(context.Background(), req.ToUser)
+
+		if err != nil || receiver == nil {
+			http.Error(w, "Получатель не найден", http.StatusNotFound)
+			return
+		}
+
+		if senderUser.Balance < req.Amount {
 			http.Error(w, "Недостаточно средств", http.StatusPaymentRequired)
 			return
 		}
 
-		senderUser.Balance -= req.amount
-		receiverUser.Balance += req.amount
-
-		s.cache.Store(r.Context().Value("username"), senderUser)
-		s.cache.Store(req.toUser, receiverUser)
-
-		s.logger.Info("Send coin", slog.Int("amount", req.amount), slog.String("from", senderUser.Username), slog.String("to", receiverUser.Username))
-
-		err := s.storage.SaveTransaction(context.Background(), senderUser.ID, receiverUser.ID, req.amount)
+		err = s.storage.SaveTransaction(context.Background(), senderUser.ID, receiver.ID, req.Amount)
 		if err != nil {
 			http.Error(w, "Не удалось сохранить транзакцию", http.StatusInternalServerError)
 			return
 		}
 
-		err = s.storage.UpdateBalance(context.Background(), senderUser.ID, -req.amount)
+		err = s.storage.UpdateBalance(context.Background(), senderUser.ID, -req.Amount)
 		if err != nil {
 			http.Error(w, "Не удалось обновить баланс", http.StatusInternalServerError)
 			return
 		}
 
-		err = s.storage.UpdateBalance(context.Background(), receiverUser.ID, req.amount)
+		err = s.storage.UpdateBalance(context.Background(), receiver.ID, req.Amount)
 		if err != nil {
 			http.Error(w, "Не удалось обновить баланс", http.StatusInternalServerError)
 			return
 		}
+
+		senderUser.Balance -= req.Amount
+		senderUser.SentTransactions = append(senderUser.SentTransactions, models.Transaction{
+			Amount:     req.Amount,
+			SenderID:   senderUser.ID,
+			ReceiverID: receiver.ID,
+		})
+		receiver.Balance += req.Amount
+		receiver.ReceivedTransactions = append(receiver.ReceivedTransactions, models.Transaction{
+			Amount:     req.Amount,
+			SenderID:   senderUser.ID,
+			ReceiverID: receiver.ID,
+		})
+
+		fmt.Println(senderUser)
+		fmt.Println(receiver)
+
+		s.cache.Store(r.Context().Value("id"), senderUser)
+		s.cache.Store(receiver.ID, receiver)
+
+		s.logger.Info("Send coin", slog.Int("amount", req.Amount), slog.String("from", senderUser.Username), slog.String("to", receiver.Username))
+
 		w.WriteHeader(http.StatusOK)
 	}
 }
 
 type coinHistory struct {
-	received int
-	sent     int
+	Received []models.ReceivedTransaction `json:"received"`
+	Sent     []models.SentTransaction     `json:"sent"`
 }
 
 type InfoResponse struct {
-	balance     int
-	inventory   map[string]int
-	coinHistory coinHistory
+	Balance     int            `json:"balance"`
+	Inventory   map[string]int `json:"inventory"`
+	CoinHistory coinHistory    `json:"coinHistory"`
 }
 
 func (s *APIServer) infoHandler() func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		username := r.Context().Value("username")
-		cachedUser, ok := s.cache.Load(username)
+		w.Header().Set("Content-Type", "application/json")
+		id := r.Context().Value("id")
+		cachedUser, ok := s.cache.Load(id)
 
 		if !ok {
 			http.Error(w, "Неверный формат пользователя", http.StatusInternalServerError)
@@ -324,12 +348,37 @@ func (s *APIServer) infoHandler() func(http.ResponseWriter, *http.Request) {
 			return
 		}
 
+		received := make([]models.ReceivedTransaction, 0)
+
+		for _, rt := range user.ReceivedTransactions {
+			cachedUser, _ := s.cache.Load(rt.SenderID)
+
+			user, _ := cachedUser.(models.User)
+
+			received = append(received, models.ReceivedTransaction{
+				FromUser: user.Username,
+				Amount:   rt.Amount,
+			})
+		}
+
+		sent := make([]models.SentTransaction, 0)
+
+		for _, st := range user.SentTransactions {
+			cachedUser, _ := s.cache.Load(st.ReceiverID)
+			user, _ := cachedUser.(models.User)
+			fmt.Println(user.Username)
+			sent = append(sent, models.SentTransaction{
+				ToUser: user.Username,
+				Amount: st.Amount,
+			})
+		}
+
 		res := InfoResponse{
-			balance:   user.Balance,
-			inventory: user.Inventory,
-			coinHistory: coinHistory{
-				received: user.CoinReceived,
-				sent:     user.CoinSent,
+			Balance:   user.Balance,
+			Inventory: user.Inventory,
+			CoinHistory: coinHistory{
+				Received: received,
+				Sent:     sent,
 			},
 		}
 
