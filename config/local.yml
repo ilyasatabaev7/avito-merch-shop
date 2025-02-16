@@ -1,0 +1,9 @@
+env: "dev" # dev, prod
+api_port: 8080
+api_host: "localhost"
+postgres:
+    host: "localhost"
+    port: "5433"
+    user: "ilyas"
+    pass: "324153"
+    db: "avito_merch_shop_db"

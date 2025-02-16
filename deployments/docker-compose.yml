@@ -1,0 +1,10 @@
+version: '3.5'
+services:
+  postgres:
+    image: postgres
+    environment:
+      POSTGRES_DB: avito_merch_shop_db
+      POSTGRES_USER: ilyas
+      POSTGRES_PASSWORD: 324153
+    ports:
+      - "5433:5432"
