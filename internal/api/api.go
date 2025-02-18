@@ -8,7 +8,6 @@ import (
 	"github.com/IlyasAtabaev731/avito-merch-shop/internal/config"
 	"github.com/IlyasAtabaev731/avito-merch-shop/internal/domain/models"
 	"github.com/IlyasAtabaev731/avito-merch-shop/internal/lib/jwt"
-	"github.com/IlyasAtabaev731/avito-merch-shop/internal/storage/postgres"
 	"github.com/gorilla/mux"
 	"golang.org/x/crypto/bcrypt"
 	"log/slog"
@@ -19,16 +18,27 @@ import (
 	"time"
 )
 
+type Storage interface {
+	SaveUser(ctx context.Context, username string, passHash []byte) error
+	GetUser(ctx context.Context, username string) (*models.User, error)
+	GetMerch(ctx context.Context, item string) (*models.Merch, error)
+	FirstBuyItem(ctx context.Context, userID int, itemID int, amount int) error
+	BuyItem(ctx context.Context, userID int, itemID int, amount int) error
+	SaveTransaction(ctx context.Context, senderUserID, receiverUserID, amount int) error
+	UpdateBalance(ctx context.Context, userID int, amount int) error
+	LoadCacheFromDB(cache *sync.Map, log *slog.Logger) error
+}
+
 type APIServer struct {
 	config    *config.Config
 	logger    *slog.Logger
 	cache     *sync.Map
 	server    *http.Server
-	storage   *postgres.Storage
+	storage   Storage
 	jwtSecret []byte
 }
 
-func New(config *config.Config, logger *slog.Logger, cache *sync.Map, storage *postgres.Storage, jwtSecret []byte) *APIServer {
+func New(config *config.Config, logger *slog.Logger, cache *sync.Map, storage Storage, jwtSecret []byte) *APIServer {
 	return &APIServer{
 		config: config,
 		logger: logger,
@@ -308,11 +318,8 @@ func (s *APIServer) sendCoinHandler() func(http.ResponseWriter, *http.Request) {
 			ReceiverID: receiver.ID,
 		})
 
-		fmt.Println(senderUser)
-		fmt.Println(receiver)
-
 		s.cache.Store(r.Context().Value("id"), senderUser)
-		s.cache.Store(receiver.ID, receiver)
+		s.cache.Store(receiver.ID, *receiver)
 
 		s.logger.Info("Send coin", slog.Int("amount", req.Amount), slog.String("from", senderUser.Username), slog.String("to", receiver.Username))
 

@@ -24,6 +24,14 @@ type Postgres struct {
 func MustLoad() *Config {
 	path := fetchConfigPath()
 
+	if path == "" {
+		panic("config path is required")
+	}
+
+	return MustLoadByPath(path)
+}
+
+func MustLoadByPath(path string) *Config {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		panic("config file does not exist: " + path)
 	}
